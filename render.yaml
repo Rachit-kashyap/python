@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: hindi-video-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: PATH=$PATH:/opt/render/project/src/bin gunicorn app:app

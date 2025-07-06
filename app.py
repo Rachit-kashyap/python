@@ -1,21 +1,10 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Hindi Text → Video Web App (Windows‑safe cleanup)
---------------------------------------------------
-Paste Hindi text → get an MP4 with white‑on‑black‑outlined subtitles
-The generated video is downloaded and then deleted a few seconds later
-so Windows has time to release the file handle (avoids WinError 32).
-
-Requires (add to requirements.txt):
-    Flask
-    gTTS
-    pydub
-FFmpeg must be in your system PATH.
+Hindi Text → Video Web API (Render-compatible)
 """
 
-from flask import Flask, request, send_file, render_template_string
+from flask import Flask, request, send_file, render_template_string, jsonify
 import os
 import uuid
 import textwrap
@@ -28,15 +17,16 @@ from pydub import AudioSegment
 app = Flask(__name__)
 
 # ========== CONFIGURATION ==========
-BACKGROUND_IMAGE = "background.jpg"  # Place an image with this name beside the script
+FFMPEG_BIN = "./bin/ffmpeg"  # Use local FFmpeg binary
+BACKGROUND_IMAGE = "background.jpg"
 FONT_SIZE = 28
 WORDS_PER_CHUNK = 8
 MAX_LINE_CHARS = 45
 FONT_COLOR = "#FFFFFF"
 OUTLINE_COLOR = "#000000"
 OUTLINE_WIDTH = 1
-PORT = int(os.getenv("PORT", 10000))  # Render sets $PORT automatically
-CLEANUP_DELAY = 5  # seconds to wait before deleting the MP4
+PORT = int(os.getenv("PORT", 10000))
+CLEANUP_DELAY = 5
 # ===================================
 
 HTML_FORM = """
@@ -52,28 +42,23 @@ HTML_FORM = """
 """
 
 def hms_ms(ms: int) -> str:
-    """millisec → 'HH:MM:SS,mmm'"""
     h, rem = divmod(ms // 1000, 3600)
     m, s = divmod(rem, 60)
     return f"{h:02}:{m:02}:{s:02},{ms%1000:03}"
 
 def run_ffmpeg(cmd):
-    """Run FFmpeg command and stop on error."""
     subprocess.run(cmd, check=True, capture_output=True)
 
 def build_video(text: str) -> str:
-    """Generate MP4 from given Hindi text. Returns the path of the MP4 file."""
     uid = uuid.uuid4().hex[:8]
     mp3 = f"{uid}.mp3"
     srt = f"{uid}.srt"
     mp4 = f"{uid}.mp4"
 
-    # 1️⃣  Text‑to‑Speech
     gTTS(text=text, lang="hi").save(mp3)
     audio = AudioSegment.from_file(mp3)
     total_ms = len(audio)
 
-    # 2️⃣  Create subtitle chunks
     words = text.split()
     chunks = [" ".join(words[i:i+WORDS_PER_CHUNK]) for i in range(0, len(words), WORDS_PER_CHUNK)]
     slice_ms = total_ms // len(chunks)
@@ -84,17 +69,14 @@ def build_video(text: str) -> str:
             end = total_ms if i == len(chunks) else i * slice_ms
             f.write(f"{i}\n{hms_ms(start)} --> {hms_ms(end)}\n{textwrap.fill(chunk, MAX_LINE_CHARS)}\n\n")
 
-    # 3️⃣  Generate video with subtitles
     ffmpeg_cmd = [
-        "ffmpeg", "-y", "-loop", "1", "-i", BACKGROUND_IMAGE, "-i", mp3,
+        FFMPEG_BIN, "-y", "-loop", "1", "-i", BACKGROUND_IMAGE, "-i", mp3,
         "-vf", f"subtitles={srt}:force_style='Fontsize={FONT_SIZE},PrimaryColour={FONT_COLOR},"
                f"OutlineColour={OUTLINE_COLOR},Outline={OUTLINE_WIDTH},Alignment=10,MarginV=30'",
         "-c:v", "libx264", "-preset", "medium", "-tune", "stillimage",
         "-c:a", "copy", "-pix_fmt", "yuv420p", "-shortest", mp4
     ]
     run_ffmpeg(ffmpeg_cmd)
-
-    # 4️⃣  Clean up intermediates
     os.remove(mp3)
     os.remove(srt)
 
@@ -110,19 +92,32 @@ def index():
         try:
             video_path = build_video(text)
         except subprocess.CalledProcessError:
-            return render_template_string(HTML_FORM, error="FFmpeg error – सुनिश्चित करें FFmpeg PATH में है")
+            return render_template_string(HTML_FORM, error="FFmpeg error")
 
-        # Store path for cleanup
         request.video_path = video_path
-
-        # Send video for download
         return send_file(video_path, as_attachment=True, download_name="hindi_video.mp4")
 
     return render_template_string(HTML_FORM, error=None)
 
+@app.post("/api")
+def api():
+    if not request.is_json:
+        return jsonify({"error": "Content-Type must be application/json"}), 415
+    text = request.json.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "'text' field is required"}), 400
+    try:
+        video_path = build_video(text)
+    except subprocess.CalledProcessError:
+        return jsonify({"error": "FFmpeg processing failed"}), 500
+    request.video_path = video_path
+    return send_file(video_path,
+                     as_attachment=True,
+                     download_name="hindi_video.mp4",
+                     mimetype="video/mp4")
+
 @app.after_request
 def delayed_cleanup(response):
-    """Delete the MP4 a few seconds after response to avoid WinError 32."""
     video_path = getattr(request, "video_path", None)
 
     def _delete(path):
